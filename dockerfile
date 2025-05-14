@@ -17,35 +17,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
-# Copy local microWakeWord project and install it
-COPY ../microWakeWord /app/microWakeWord
+# Clone and install the kiwina/microWakeWord project from GitHub
+RUN git clone https://github.com/kiwina/microWakeWord.git /app/microWakeWord
 RUN pip install --no-cache-dir -e /app/microWakeWord
 
-# Copy local piper-sample-generator project
-# It's used as scripts, but if it had its own installable package, you'd pip install -e it too.
-# For now, we ensure its scripts are accessible. The notebooks will add it to sys.path if needed,
-# or call scripts directly from /data/piper-sample-generator after prepare_local_data.py clones it there.
-# However, to ensure its direct dependencies (like piper-phonemize) are met if not covered by main reqs:
-COPY ../piper-sample-generator /app/piper-sample-generator
-# If piper-sample-generator had its own setup.py for broader use:
-# RUN pip install --no-cache-dir -e /app/piper-sample-generator
-# For now, ensure its requirements (if any beyond torch/numpy which should be handled by trainer's env) are met.
-# The piper-sample-generator/requirements.txt we edited mainly lists torch, numpy, audiomentations, etc.
-# which should be covered by the main requirements.txt or base image.
-# If it has unique small dependencies, list them in MicroWakeWord-Trainer-Docker/requirements.txt or install its reqs:
-# RUN pip install --no-cache-dir -r /app/piper-sample-generator/requirements.txt
+# piper-sample-generator will be cloned into /data by prepare_local_data.py, so no global install here.
 
 # Create a data directory for external mapping and notebook execution
 RUN mkdir -p /data
 WORKDIR /data
 
-# Copy the notebooks to a fallback location in the container (used by startup.sh)
+# Copy the notebooks and prepare_local_data.py to a fallback location in the container (used by startup.sh)
 # These .ipynb files should be generated from the .py versions and placed in the
 # MicroWakeWord-Trainer-Docker directory before building the image.
+# prepare_local_data.py is assumed to be at the root of the build context (c:/_ai/trash/train)
 COPY basic_training_notebook.ipynb /root/basic_training_notebook.ipynb
 COPY advanced_training_notebook.ipynb /root/advanced_training_notebook.ipynb
-# COPY prepare_local_data.py /root/prepare_local_data.py # If startup.sh also copies this
-
+# Assuming prepare_local_data.py is at workspace root
+COPY prepare_local_data.py /root/prepare_local_data.py
+COPY advanced_training_notebook.py /root/advanced_training_notebook.py
+COPY basic_training_notebook.py /root/basic_training_notebook.py
 # Add the startup script from local file
 COPY startup.sh /usr/local/bin/startup.sh
 RUN chmod +x /usr/local/bin/startup.sh
