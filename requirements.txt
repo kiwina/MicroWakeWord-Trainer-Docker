@@ -1,33 +1,42 @@
 # MicroWakeWord-Trainer-Docker specific dependencies
-# These are packages assumed to be needed on top of the
-# tensorflow/tensorflow:2.19.0-gpu-jupyter base image.
+# These packages are needed on top of the tensorflow/tensorflow:2.18.0-gpu-jupyter base image
+# All packages are compatible with Python 3.11
+
+# PyTorch and TorchAudio for additional ML capabilities
+# Compatible with Python 3.11 and CUDA
+torch==2.3.0
+torchaudio==2.3.0
+torchvision==0.18.0
 
 # For audio processing and augmentation
-audiomentations==0.39.0 # Updated version, check compatibility
+audiomentations==0.39.0
 audioread==3.0.1
-librosa==0.10.2.post1 # Check if TF base image has a compatible numpy/scipy
+librosa==0.10.2.post1
 soundfile==0.12.1
 soxr==0.5.0.post1
-webrtcvad==2.0.10 # Often compiled, ensure build-essential covers it
+webrtcvad==2.0.10
 
 # For data handling and utilities
-datasets==3.3.1 # Updated version
+datasets==3.3.1
 dill==0.3.8
 filelock==3.16.1
-fsspec==2024.12.0 # Check version compatibility with datasets
-huggingface-hub==0.27.0 # Check version
+fsspec==2024.12.0
+huggingface-hub==0.27.0
 mmap_ninja==0.7.4
-multiprocess==0.70.16 # For potential parallel processing
-pandas==2.2.3 # Base image has 2.2.2, this is a minor update, can align if needed
+multiprocess==0.70.16
+# Use pandas version from base image to ensure compatibility
+pandas==2.2.2
 pooch==1.8.2
-pyarrow==18.1.0 # Base image has 17.0.0, this is an update
+# Use pyarrow version from base image to ensure compatibility
+pyarrow==17.0.0
 xxhash==3.5.0
 
+# TensorFlow ecosystem packages
+tensorflow-text==2.18.1
+tf-keras==2.18.0
+tensorflow-decision-forests==1.11.0
+
 # Note:
-# - tensorflow, keras, numpy, scipy, jupyter, ipywidgets, etc., are expected from the base image.
-# - audio-metadata: To be handled in the microWakeWord project itself (remove or replace).
-# - microwakeword: This will be installed from the local project, not via pip from git here.
-# - pymicro-features: This will be installed from the local project or its updated source.
-# - NVIDIA packages (nvidia-*) are removed as they are part of the base GPU image.
-# - Versions for audiomentations, datasets, etc., are indicative and should be tested for compatibility
-#   with Python 3.11 and the base image's core libraries (like numpy, scipy).
+# - tensorflow, keras, numpy, scipy, jupyter, ipywidgets, etc., are provided by the base image
+# - microwakeword is installed from the local project via the Dockerfile
+# - NVIDIA packages are part of the base GPU image

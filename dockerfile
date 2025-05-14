@@ -1,5 +1,9 @@
-# Use TensorFlow 2.19.0 as the base image (includes Python 3.11, CUDA, CuDNN)
-FROM tensorflow/tensorflow:2.19.0-gpu-jupyter
+# Use TensorFlow 2.18.0 as the base image
+# This image includes:
+# - Python 3.11 (not Python 3.10)
+# - CUDA and CuDNN for GPU acceleration
+# - Jupyter notebook server
+FROM tensorflow/tensorflow:2.18.0-gpu-jupyter
 
 # Set environment variables for non-interactive installations and Python buffering
 ENV DEBIAN_FRONTEND=noninteractive
@@ -31,12 +35,11 @@ WORKDIR /data
 # These .ipynb files should be generated from the .py versions and placed in the
 # MicroWakeWord-Trainer-Docker directory before building the image.
 # prepare_local_data.py is assumed to be at the root of the build context (c:/_ai/trash/train)
-COPY basic_training_notebook.ipynb /root/basic_training_notebook.ipynb
-COPY advanced_training_notebook.ipynb /root/advanced_training_notebook.ipynb
-# Assuming prepare_local_data.py is at workspace root
+# Copy the notebook files to the container
+COPY basic_training_notebook_docker.ipynb /root/basic_training_notebook_docker.ipynb
+COPY advanced_training_notebook_docker.ipynb /root/advanced_training_notebook_docker.ipynb
+# Copy the data preparation script
 COPY prepare_local_data.py /root/prepare_local_data.py
-COPY advanced_training_notebook.py /root/advanced_training_notebook.py
-COPY basic_training_notebook.py /root/basic_training_notebook.py
 # Add the startup script from local file
 COPY startup.sh /usr/local/bin/startup.sh
 RUN chmod +x /usr/local/bin/startup.sh

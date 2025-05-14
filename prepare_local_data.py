@@ -14,6 +14,7 @@ import requests
 import zipfile
 import shutil
 import argparse
+import datetime
 from pathlib import Path
 from tqdm import tqdm
 
@@ -47,7 +48,12 @@ if args.data_dir:
     base_data_dir = Path(args.data_dir)
     print(f"Using data directory from --data-dir argument: {base_data_dir.resolve().absolute()}")
 elif os.environ.get('LOCAL_DATA_DIR'):
-    base_data_dir = Path(os.environ.get('LOCAL_DATA_DIR'))
+    local_data_dir = os.environ.get('LOCAL_DATA_DIR')
+    if local_data_dir is not None:  # Explicit check to satisfy type checker
+        base_data_dir = Path(local_data_dir)
+    else:
+        # This should never happen since we already checked os.environ.get('LOCAL_DATA_DIR')
+        base_data_dir = Path('/data') if IN_DOCKER else Path(__file__).resolve().parent / 'microwakeword-trainer-data'
     print(f"Using data directory from LOCAL_DATA_DIR environment variable: {base_data_dir.resolve().absolute()}")
 elif IN_DOCKER:
     base_data_dir = Path('/data')
@@ -64,16 +70,33 @@ base_data_dir.mkdir(parents=True, exist_ok=True)
 # IN_DOCKER definition moved up, old comment removed. Original empty line 49 is preserved by this structure.
 
 # Attempt to import heavy libraries only if needed, or ensure they are prerequisites
-try:
-    import scipy.io.wavfile
-    import numpy as np
-    from datasets import Dataset, Audio, load_dataset # For MIT RIR, FMA conversion
-    import soundfile as sf # For Audioset conversion
-except ImportError as e:
-    print(f"Missing one or more required Python packages: {e}")
-    print("Please ensure the packages listed in 'data_preparation/requirements.txt' are installed.")
-    print("You can install them by running: pip install -r data_preparation/requirements.txt")
+required_packages = {
+    'scipy': 'scipy.io.wavfile',
+    'numpy': 'numpy',
+    'datasets': 'datasets',
+    'soundfile': 'soundfile'
+}
+
+missing_packages = []
+
+# Check each package individually to provide better error messages
+for package, import_name in required_packages.items():
+    try:
+        __import__(import_name.split('.')[0])
+    except ImportError:
+        missing_packages.append(package)
+
+if missing_packages:
+    print(f"Missing required Python packages: {', '.join(missing_packages)}")
+    print("Please ensure these packages are installed before running this script.")
+    print("You can install them by running: pip install " + " ".join(missing_packages))
     sys.exit(1)
+
+# Now that we've verified the packages exist, import them
+import scipy.io.wavfile
+import numpy as np
+from datasets import Dataset, Audio, load_dataset  # For MIT RIR, FMA conversion
+import soundfile as sf  # For Audioset conversion
 
 # Print resolved data directory
 # This print statement is now covered by the more specific prints in the base_data_dir determination logic.
@@ -86,10 +109,14 @@ if IN_DOCKER:
 # PIPER_REPO_URL_OTHER = "https://github.com/rhasspy/piper-sample-generator" # Unused, kiwina fork URL is now hardcoded in prepare_git_repos
 PIPER_REPO_DIR = base_data_dir / "piper-sample-generator" # This is the target directory for the kiwina fork
 
+# Piper TTS Model Configuration
 PIPER_MODEL_FILENAME = "en_US-libritts_r-medium.pt"
+PIPER_MODEL_JSON_FILENAME = "en_US-libritts_r-medium.pt.json"
 PIPER_MODEL_URL = f"https://github.com/rhasspy/piper-sample-generator/releases/download/v2.0.0/{PIPER_MODEL_FILENAME}"
+PIPER_MODEL_JSON_URL = f"https://github.com/rhasspy/piper-sample-generator/releases/download/v2.0.0/{PIPER_MODEL_JSON_FILENAME}"
 PIPER_MODEL_DIR = PIPER_REPO_DIR / "models"
 PIPER_MODEL_FILE = PIPER_MODEL_DIR / PIPER_MODEL_FILENAME
+PIPER_MODEL_JSON_FILE = PIPER_MODEL_DIR / PIPER_MODEL_JSON_FILENAME
 
 # Augmentation Data Paths
 MIT_RIR_OUTPUT_DIR = base_data_dir / "mit_rirs"
@@ -127,8 +154,18 @@ def run_command(command_list, description):
 
 def download_file_simple(url, output_path, description="file"):
     output_path = Path(output_path)
+    
+    # Check if file already exists and has content
+    if output_path.exists() and output_path.stat().st_size > 0:
+        print(f"{description.capitalize()} already exists at {output_path} ({output_path.stat().st_size / (1024*1024):.2f} MB). Skipping download.")
+        return True
+        
     print(f"Downloading {description} from {url} to {output_path}...")
     try:
+        # Create parent directories if they don't exist
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Download with progress bar
         response = requests.get(url, stream=True)
         response.raise_for_status()
         total_size = int(response.headers.get('content-length', 0))
@@ -139,8 +176,14 @@ def download_file_simple(url, output_path, description="file"):
             for chunk in response.iter_content(chunk_size=8192):
                 f.write(chunk)
                 bar.update(len(chunk))
-        print(f"Successfully downloaded {description} to {output_path}.")
-        return True
+        
+        # Verify download was successful
+        if output_path.exists() and output_path.stat().st_size > 0:
+            print(f"Successfully downloaded {description} to {output_path} ({output_path.stat().st_size / (1024*1024):.2f} MB).")
+            return True
+        else:
+            print(f"Error: Downloaded file {output_path} is empty or does not exist.")
+            return False
     except Exception as e:
         print(f"Error downloading {description} from {url}: {e}")
         if output_path.exists(): # Clean up partial download
@@ -150,24 +193,53 @@ def download_file_simple(url, output_path, description="file"):
 def extract_zip_robust(zip_path, extract_to, expected_content_name=None):
     zip_path = Path(zip_path)
     extract_to = Path(extract_to)
-    print(f"Attempting to extract {zip_path} to {extract_to}...")
+    print(f"Checking if extraction is needed for {zip_path}...")
 
+    # Check if expected content already exists
     if expected_content_name:
         extracted_content_path = extract_to / expected_content_name
         if extracted_content_path.is_dir():
-            print(f"Content '{expected_content_name}' already found at {extracted_content_path}. Skipping extraction.")
-            return True
+            # Check if directory has content
+            content_files = list(extracted_content_path.glob('**/*'))
+            if content_files:
+                print(f"Content '{expected_content_name}' already found at {extracted_content_path} with {len(content_files)} files. Skipping extraction.")
+                return True
+            else:
+                print(f"Directory '{expected_content_name}' exists but appears empty. Will attempt extraction.")
     
     if not zip_path.exists():
         print(f"ERROR: Cannot extract, ZIP file not found: {zip_path}")
         return False
 
+    print(f"Extracting {zip_path} to {extract_to}...")
     try:
         with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            # Get list of files in the zip to check size
+            zip_files = zip_ref.namelist()
+            print(f"ZIP contains {len(zip_files)} files/directories.")
+            
+            # Extract all files
             zip_ref.extractall(extract_to)
+            
         print(f"Successfully extracted {zip_path} to {extract_to}.")
-        if expected_content_name and not (extract_to / expected_content_name).is_dir():
-             print(f"Warning: Extraction of {zip_path.name} was called, but target directory {extract_to / expected_content_name} was not created as expected.")
+        
+        # Verify extraction was successful
+        if expected_content_name:
+            extracted_path = extract_to / expected_content_name
+            if not extracted_path.is_dir():
+                print(f"Warning: Extraction of {zip_path.name} was called, but target directory {extracted_path} was not created as expected.")
+                # Check if files were extracted directly to extract_to instead
+                direct_files = list(extract_to.glob('*'))
+                if len(direct_files) > 1:  # More than just the zip file
+                    print(f"Files appear to have been extracted directly to {extract_to} instead of a subdirectory.")
+                    return True
+                return False
+            else:
+                # Check if directory has content
+                content_files = list(extracted_path.glob('**/*'))
+                if not content_files:
+                    print(f"Warning: Extracted directory {extracted_path} appears to be empty.")
+                    return False
         return True
     except Exception as e:
         print(f"Error extracting {zip_path}: {e}")
@@ -177,6 +249,7 @@ def extract_zip_robust(zip_path, extract_to, expected_content_name=None):
 
 def prepare_git_repos():
     print("\n--- Preparing Git Repositories ---")
+    
     # Piper Sample Generator
     if not PIPER_REPO_DIR.is_dir():
         print(f"Cloning Piper Sample Generator repository (kiwina fork) to {PIPER_REPO_DIR}...")
@@ -190,19 +263,66 @@ def prepare_git_repos():
         if not run_command(cmd, "Cloning Piper Sample Generator (kiwina fork)"):
             return False # Critical failure
     else:
-        print(f"Piper Sample Generator repository already exists at {PIPER_REPO_DIR}. Assuming it's the correct kiwina fork.")
-    # microWakeWord repo is installed via Dockerfile, no clone needed here by this script.
+        print(f"Piper Sample Generator repository already exists at {PIPER_REPO_DIR}.")
+        # Verify it's the correct repository by checking for specific files
+        if (PIPER_REPO_DIR / "generate_samples.py").exists():
+            print(f"Verified Piper Sample Generator repository at {PIPER_REPO_DIR}.")
+        else:
+            print(f"Warning: Directory exists at {PIPER_REPO_DIR} but may not be the correct Piper repository.")
+            print("Attempting to update repository...")
+            # Try to pull latest changes
+            if not run_command(["git", "-C", str(PIPER_REPO_DIR), "pull"], "Updating Piper Sample Generator"):
+                print("Warning: Could not update repository. Continuing with existing files.")
+    
+    # microWakeWord repo
+    MICROWAKEWORD_REPO_DIR = base_data_dir / "microWakeWord"
+    if not MICROWAKEWORD_REPO_DIR.is_dir():
+        print(f"Cloning microWakeWord repository to {MICROWAKEWORD_REPO_DIR}...")
+        
+        clone_url = "https://github.com/kiwina/microWakeWord.git"
+        
+        cmd = ["git", "clone", clone_url, str(MICROWAKEWORD_REPO_DIR)]
+        
+        if not run_command(cmd, "Cloning microWakeWord repository"):
+            print("Warning: Failed to clone microWakeWord repository. It may be installed via Dockerfile.")
+    else:
+        print(f"microWakeWord repository already exists at {MICROWAKEWORD_REPO_DIR}.")
+        # Verify it's the correct repository
+        if (MICROWAKEWORD_REPO_DIR / "setup.py").exists():
+            print(f"Verified microWakeWord repository at {MICROWAKEWORD_REPO_DIR}.")
+            # Try to pull latest changes
+            if not run_command(["git", "-C", str(MICROWAKEWORD_REPO_DIR), "pull"], "Updating microWakeWord"):
+                print("Warning: Could not update repository. Continuing with existing files.")
+        else:
+            print(f"Warning: Directory exists at {MICROWAKEWORD_REPO_DIR} but may not be the correct microWakeWord repository.")
+    
     return True
 
 def prepare_piper_model():
     print("\n--- Preparing Piper TTS Model ---")
     PIPER_MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    
+    # Download model file if needed
+    model_success = True
     if not PIPER_MODEL_FILE.exists():
+        print(f"Downloading Piper TTS model file from {PIPER_MODEL_URL}...")
         if not download_file_simple(PIPER_MODEL_URL, PIPER_MODEL_FILE, "Piper TTS Model"):
-            return False # Critical failure
+            model_success = False
+            print("Failed to download Piper TTS model file. This is required for training.")
     else:
-        print(f"Piper TTS model already exists at {PIPER_MODEL_FILE}.")
-    return True
+        print(f"Piper TTS model already exists at {PIPER_MODEL_FILE} ({PIPER_MODEL_FILE.stat().st_size / (1024*1024):.2f} MB).")
+    
+    # Download model JSON file if needed
+    json_success = True
+    if not PIPER_MODEL_JSON_FILE.exists():
+        print(f"Downloading Piper TTS model JSON file from {PIPER_MODEL_JSON_URL}...")
+        if not download_file_simple(PIPER_MODEL_JSON_URL, PIPER_MODEL_JSON_FILE, "Piper TTS Model JSON"):
+            json_success = False
+            print("Failed to download Piper TTS model JSON file. This may affect training.")
+    else:
+        print(f"Piper TTS model JSON already exists at {PIPER_MODEL_JSON_FILE} ({PIPER_MODEL_JSON_FILE.stat().st_size / 1024:.2f} KB).")
+    
+    return model_success and json_success
 
 def prepare_mit_rir():
     print("\n--- Preparing MIT RIR Dataset ---")
@@ -210,13 +330,17 @@ def prepare_mit_rir():
     
     # Check if already processed (e.g., by counting wav files)
     existing_files = list(MIT_RIR_OUTPUT_DIR.glob("*.wav"))
-    # A more robust check might involve knowing the expected number of files.
-    # For now, if any wav files exist, assume it's mostly done.
-    if existing_files:
+    # MIT RIR dataset should have around 271 files
+    expected_min_files = 250  # Setting a minimum threshold
+    
+    if existing_files and len(existing_files) >= expected_min_files:
         print(f"MIT RIR dataset appears to be already processed in {MIT_RIR_OUTPUT_DIR} ({len(existing_files)} files found). Skipping.")
         return True
-
-    print(f"Downloading and processing MIT RIR dataset to {MIT_RIR_OUTPUT_DIR}...")
+    elif existing_files:
+        print(f"MIT RIR dataset partially processed in {MIT_RIR_OUTPUT_DIR} ({len(existing_files)} files found, expected at least {expected_min_files}).")
+        print("Will attempt to complete the dataset...")
+    else:
+        print(f"No MIT RIR files found. Downloading and processing MIT RIR dataset to {MIT_RIR_OUTPUT_DIR}...")
     try:
         rir_dataset = load_dataset("davidscripka/MIT_environmental_impulse_responses", split="train", streaming=True)
         for row in tqdm(rir_dataset, desc="Processing MIT RIR"):
@@ -439,16 +563,39 @@ def prepare_negative_features():
     NEGATIVE_FEATURES_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     all_extracted = True
 
+    # Check if all extracted directories already exist
+    all_dirs_exist = True
+    for fname in NEGATIVE_FEATURES_FILENAMES:
+        extracted_content_dir_name = fname.replace('.zip', '')
+        extracted_dir = NEGATIVE_FEATURES_OUTPUT_DIR / extracted_content_dir_name
+        if not extracted_dir.is_dir():
+            all_dirs_exist = False
+            break
+    
+    if all_dirs_exist:
+        print(f"All negative feature directories already exist in {NEGATIVE_FEATURES_OUTPUT_DIR}. Skipping download and extraction.")
+        return True
+
     for fname in NEGATIVE_FEATURES_FILENAMES:
         link = NEGATIVE_FEATURES_LINK_ROOT + fname
         zip_path = NEGATIVE_FEATURES_OUTPUT_DIR / fname
         extracted_content_dir_name = fname.replace('.zip', '')
+        extracted_dir = NEGATIVE_FEATURES_OUTPUT_DIR / extracted_content_dir_name
+        
+        # Skip if the extracted directory already exists
+        if extracted_dir.is_dir():
+            print(f"Directory {extracted_dir} already exists. Skipping download and extraction for {fname}.")
+            continue
         
         if not zip_path.exists():
+            print(f"Downloading {fname} from {link}...")
             if not download_file_simple(link, zip_path, f"Negative feature set {fname}"):
                 all_extracted = False # Mark as failure if download fails
                 continue # Try next file
+        else:
+            print(f"ZIP file {zip_path} already exists. Skipping download.")
         
+        print(f"Extracting {zip_path} to {NEGATIVE_FEATURES_OUTPUT_DIR}...")
         if not extract_zip_robust(zip_path, NEGATIVE_FEATURES_OUTPUT_DIR, extracted_content_dir_name):
             all_extracted = False # Mark as failure if extraction fails and content not there
             
@@ -456,10 +603,17 @@ def prepare_negative_features():
 
 # --- Main Execution ---
 if __name__ == "__main__":
+    print("=" * 80)
     print("Starting local data preparation process...")
     print(f"Using data directory: {base_data_dir.absolute()}")
     if IN_DOCKER:
         print("Running inside Docker container - Windows-specific steps will be skipped")
+    
+    # Create a marker file to track successful runs
+    marker_file = base_data_dir / ".data_preparation_completed"
+    if marker_file.exists():
+        print(f"Marker file {marker_file} found. Data preparation has been run before.")
+        print("This script will still check for and download any missing assets.")
     
     overall_success = True
 
@@ -467,38 +621,105 @@ if __name__ == "__main__":
     if IN_DOCKER and platform.system() == "Windows":
         print("WARNING: Detected Windows platform while running in Docker. Some Windows-specific steps may not work correctly.")
 
-    if not prepare_git_repos(): overall_success = False
-    if overall_success and not prepare_piper_model(): overall_success = False
+    print("\nStep 1/5: Preparing Git repositories")
+    if not prepare_git_repos():
+        overall_success = False
+        print("Warning: Git repository preparation had issues. Continuing with other steps...")
     
-    # Augmentation Data
-    if overall_success and not prepare_mit_rir(): overall_success = False
-    # Audioset and FMA are more complex and might have partial successes.
-    # The functions return False on major failures.
-    '''
-    if overall_success:
-        print(f"Note: Audioset and FMA preparation can be very long and consume significant disk space in {base_data_dir}.")
+    print("\nStep 2/5: Preparing Piper TTS model")
+    if not prepare_piper_model():
+        overall_success = False
+        print("Error: Piper model preparation failed. This is required for training.")
+    
+    print("\nStep 3/5: Preparing MIT RIR dataset (room impulse responses)")
+    if not prepare_mit_rir():
+        print("Warning: MIT RIR dataset preparation had issues. Training can continue but audio augmentation may be limited.")
+
+    print("\nStep 4/5: Preparing Audioset and FMA datasets")
+    # Audioset and FMA are large datasets that take significant time to process
+    existing_audioset_wavs = list(AUDIOSONET_OUTPUT_WAV_DIR.glob("*.wav"))
+    if existing_audioset_wavs:
+        print(f"Found {len(existing_audioset_wavs)} existing Audioset WAV files in {AUDIOSONET_OUTPUT_WAV_DIR}. Skipping Audioset preparation.")
+    else:
+        print("Audioset preparation can take a long time. Starting...")
         if not prepare_audioset():
             print(f"Audioset preparation reported issues. Check logs and verify contents in {AUDIOSONET_OUTPUT_WAV_DIR}.")
-            # Decide if this is a critical failure for overall_success
-            # overall_success = False
+            print("Continuing with other datasets...")
+    
+    # Check if FMA WAVs already exist
+    existing_fma_wavs = list(FMA_OUTPUT_WAV_DIR.glob("*.wav"))
+    if existing_fma_wavs:
+        print(f"Found {len(existing_fma_wavs)} existing FMA WAV files in {FMA_OUTPUT_WAV_DIR}. Skipping FMA preparation.")
+    else:
+        print("FMA preparation can take a long time. Starting...")
         if not prepare_fma():
             print(f"FMA preparation reported issues. Check logs and verify contents in {FMA_OUTPUT_WAV_DIR}.")
-            # overall_success = False
-    '''
-    if overall_success and not prepare_negative_features(): overall_success = False
+            print("Continuing with other datasets...")
+    
+    print("\nStep 5/5: Preparing negative spectrogram features")
+    if not prepare_negative_features():
+        overall_success = False
+        print("Warning: Negative features preparation had issues. This may affect training quality.")
 
-    print("-" * 50)
+    print("=" * 80)
     if overall_success:
-        print("Local data preparation process completed successfully (or with warnings for some datasets).")
-        print(f"All data has been stored in: {base_data_dir.absolute()}")
-        print("Please verify the contents of the output directories:")
-        print(f"  Piper Repo: {PIPER_REPO_DIR}")
-        print(f"  Piper Model: {PIPER_MODEL_FILE}")
-        print(f"  MIT RIR WAVs: {MIT_RIR_OUTPUT_DIR}")
-        print(f"  Audioset WAVs: {AUDIOSONET_OUTPUT_WAV_DIR}")
-        print(f"  FMA WAVs: {FMA_OUTPUT_WAV_DIR}")
-        print(f"  Negative Features: {NEGATIVE_FEATURES_OUTPUT_DIR}")
+        print("Local data preparation process completed successfully!")
+        # Create marker file to indicate successful run
+        with open(marker_file, 'w') as f:
+            f.write(f"Data preparation completed successfully on {platform.node()} at {datetime.datetime.now()}")
     else:
-        print("Local data preparation process encountered errors. Please review the logs above.")
-        sys.exit(1)
-    print("-" * 50)
+        print("Local data preparation process completed with some warnings or errors.")
+        print("Training may still work if the essential components were prepared successfully.")
+    
+    # Create a summary file with information about the prepared data
+    summary_file = base_data_dir / "data_summary.txt"
+    try:
+        with open(summary_file, 'w') as f:
+            f.write(f"MicroWakeWord Training Data Summary\n")
+            f.write(f"Generated on: {datetime.datetime.now()}\n")
+            f.write(f"Data directory: {base_data_dir.absolute()}\n\n")
+            
+            f.write("Git Repositories:\n")
+            f.write(f"- Piper Sample Generator: {PIPER_REPO_DIR.exists()}\n")
+            microwakeword_dir = base_data_dir / "microWakeWord"
+            f.write(f"- microWakeWord: {microwakeword_dir.exists()}\n\n")
+            
+            f.write("Models:\n")
+            f.write(f"- Piper TTS Model: {PIPER_MODEL_FILE.exists()} ({PIPER_MODEL_FILE.stat().st_size / (1024*1024):.2f} MB if exists)\n")
+            f.write(f"- Piper TTS Model JSON: {PIPER_MODEL_JSON_FILE.exists()} ({PIPER_MODEL_JSON_FILE.stat().st_size / 1024:.2f} KB if exists)\n\n")
+            
+            f.write("Datasets:\n")
+            mit_rir_files = list(MIT_RIR_OUTPUT_DIR.glob('*.wav'))
+            f.write(f"- MIT RIR: {len(mit_rir_files)} files\n")
+            
+            audioset_files = list(AUDIOSONET_OUTPUT_WAV_DIR.glob('*.wav'))
+            f.write(f"- Audioset: {len(audioset_files)} files\n")
+            
+            fma_files = list(FMA_OUTPUT_WAV_DIR.glob('*.wav'))
+            f.write(f"- FMA: {len(fma_files)} files\n\n")
+            
+            f.write("Negative Features:\n")
+            for feature_dir in NEGATIVE_FEATURES_OUTPUT_DIR.glob('*'):
+                if feature_dir.is_dir():
+                    feature_files = list(feature_dir.glob('**/*'))
+                    f.write(f"- {feature_dir.name}: {len(feature_files)} files\n")
+        
+        print(f"\nData summary written to {summary_file}")
+    except Exception as e:
+        print(f"Error writing summary file: {e}")
+    
+    print(f"\nAll data has been stored in: {base_data_dir.absolute()}")
+    print("\nPlease verify the contents of the output directories:")
+    print(f"  Piper Repo: {PIPER_REPO_DIR}")
+    print(f"  Piper Model: {PIPER_MODEL_FILE}")
+    print(f"  MIT RIR WAVs: {MIT_RIR_OUTPUT_DIR} ({len(list(MIT_RIR_OUTPUT_DIR.glob('*.wav')))} files)")
+    print(f"  Audioset WAVs: {AUDIOSONET_OUTPUT_WAV_DIR} ({len(list(AUDIOSONET_OUTPUT_WAV_DIR.glob('*.wav')))} files)")
+    print(f"  FMA WAVs: {FMA_OUTPUT_WAV_DIR} ({len(list(FMA_OUTPUT_WAV_DIR.glob('*.wav')))} files)")
+    print(f"  Negative Features: {NEGATIVE_FEATURES_OUTPUT_DIR}")
+    
+    # List negative feature directories
+    neg_feature_dirs = [d for d in NEGATIVE_FEATURES_OUTPUT_DIR.glob('*') if d.is_dir()]
+    for neg_dir in neg_feature_dirs:
+        print(f"    - {neg_dir.name} ({len(list(neg_dir.glob('**/*')))} files)")
+    
+    print("=" * 80)
