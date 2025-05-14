@@ -1,83 +1,90 @@
-<div align="center">
-  <img src="https://raw.githubusercontent.com/MasterPhooey/MicroWakeWord-Trainer-Docker/refs/heads/main/mmw.png" alt="MicroWakeWord Trainer Logo" width="100" />
-  <h1>MicroWakeWord Trainer Docker</h1>
-</div>
+# MicroWakeWord Trainer Docker
 
-Easily train MicroWakeWord detection models with this pre-built Docker image.
+Easily train MicroWakeWord detection models with this Docker image. This setup uses Python 3.11 and is based on the `tensorflow/tensorflow:2.19.0-gpu-jupyter` image.
 
 ## Prerequisites
 
 - Docker installed on your system.
-- An NVIDIA GPU with CUDA support (optional but recommended for faster training).
+- An NVIDIA GPU with CUDA support (optional but highly recommended for faster training).
+- Local clones of the `kiwina/microWakeWord` and `kiwina/piper-sample-generator` repositories in the parent directory relative to this `MicroWakeWord-Trainer-Docker` project folder. The Docker build process will copy these local projects into the image.
 
 ## Quick Start
 
 Follow these steps to get started with the microWakeWord Trainer:
 
-### 1. Pull the Pre-Built Docker Image
+### 1. Build the Docker Image Locally
 
-Pull the Docker image from Docker Hub:
+Navigate to the `MicroWakeWord-Trainer-Docker` directory (this directory) in your terminal and run:
+
 ```bash
-docker pull masterphooey/microwakeword-trainer
+docker build -t kiwina/microwakeword-trainer .
 ```
+
+_(You can replace `kiwina/microwakeword-trainer` with your preferred image name and tag.)_
 
 ### 2. Run the Docker Container
 
-Start the container with a mapped volume for saving your data and expose the Jupyter Notebook:
+Start the container with a mapped volume for saving your data and expose the Jupyter Notebook port:
+
 ```bash
 docker run --rm -it \
-    --gpus all \ 
+    --gpus all \
     -p 8888:8888 \
-    -v $(pwd):/data \
-    masterphooey/microwakeword-trainer
+    -v $(pwd)/../microwakeword-trainer-data:/data \
+    kiwina/microwakeword-trainer
 ```
---gpus all: Enables GPU acceleration (optional, remove if not using a GPU).
--p 8888:8888: Exposes the Jupyter Notebook on port 8888.
--v $(pwd):/data: Maps the current directory to the container's /data directory for saving your files.
+
+_(Note: `$(pwd)/../microwakeword-trainer-data` assumes `microwakeword-trainer-data` is in the parent directory of `MicroWakeWord-Trainer-Docker`. Adjust the path if your `microwakeword-trainer-data` directory is located elsewhere.)_
+
+- `--gpus all`: Enables GPU acceleration (optional, remove if not using a GPU).
+- `-p 8888:8888`: Exposes the Jupyter Notebook on port 8888.
+- `-v ...:/data`: Maps a local directory (e.g., `microwakeword-trainer-data`) to the container's `/data` directory. This is where all generated samples, datasets, trained models, and notebooks will be stored, ensuring persistence.
 
 ### 3. Access Jupyter Notebook
 
 Open your web browser and navigate to:
+
 ```bash
 http://localhost:8888
 ```
-The notebook interface should appear.
 
-### 4. Edit the Wake Word
+(A token might be required if you don't disable it in the CMD of the Dockerfile; the current Dockerfile disables the token.)
 
-Locate and edit the second cell in the notebook to specify your desired wake word:
-```bash
-target_word = 'khum_puter'  # Phonetic spellings may produce better samples
+The notebook interface should appear, showing the contents of the `/data` directory.
+
+### 4. Prepare Notebooks (if first time)
+
+The `startup.sh` script within the container will automatically copy the `basic_training_notebook.ipynb` and `advanced_training_notebook.ipynb` from the image's `/root/` directory to `/data/` if they are not already present. You should generate these `.ipynb` files from their corresponding `.py` versions (which were modified in this project) and ensure they are present in the `MicroWakeWord-Trainer-Docker` directory before building the Docker image so they are correctly copied.
+
+### 5. Edit the Wake Word
+
+Open either `basic_training_notebook.ipynb` or `advanced_training_notebook.ipynb` from the Jupyter interface. Locate the cell defining `target_word` and change it to your desired wake word:
+
+```python
+target_word = 'your_wake_word_here'  # Phonetic spellings may produce better samples
 ```
-Change 'khum_puter' to your desired wake word.
 
-### 5. Run the Notebook
-Run all cells in the notebook. The process will:
+### 6. Run the Notebook
 
-Generate wake word samples.
-Train a detection model.
-Output a quantized .tflite model for on-device use.
+Run all cells in the chosen notebook. The process will:
 
-### 6. Retrieve the Trained Model and JSON
-Once the training is complete, the quantized .tflite model and .json will be available for download. Follow the instructions in the last cell of the notebook to download the model.
+- **Prepare Data**: The initial cells in the notebook now handle the download and preparation of all necessary datasets (Piper TTS model, augmentation audio, negative features) directly into subdirectories within `/data`. This process is idempotent; if data already exists, it will be skipped.
+- Generate wake word samples.
+- Train a detection model.
+- Output a quantized `.tflite` model and a corresponding JSON manifest file into the `/data` directory (specifically, within subfolders like `/data/trained_models/wakeword/` or directly in `/data` for the final output).
+
+### 7. Retrieve the Trained Model and JSON
+
+Once the training is complete, the quantized `.tflite` model and `.json` manifest will be available in your mapped local directory (e.g., `microwakeword-trainer-data`).
 
 ## Resetting to a Clean State
-If you need to start fresh:
 
-### Delete your data folder:
-Locate and delete the data folder that was mapped to your Docker container.
+If you need to start fresh with datasets or generated content:
 
-### Restart the Docker container:
-Run the container again using the steps provided above.
-
-### Fresh notebook generated:
-Upon restarting, a clean version of the training notebook will be placed in the newly created data directory.
-This will reset your MicroWakeWord-Training-Docker environment to its initial state.
+- **Delete specific subfolders** within your local `microwakeword-trainer-data` directory (e.g., `generated_samples_ww`, `mit_rirs`, `trained_models`). The data preparation logic in the notebooks will then re-download/re-process only the missing parts.
+- To reset the notebooks themselves, delete them from your local `microwakeword-trainer-data` directory. When you restart the Docker container, the `startup.sh` script will copy fresh versions from the image.
 
 ## Credits
 
 This project builds upon the excellent work of [kahrendt/microWakeWord](https://github.com/kahrendt/microWakeWord). A huge thank you to the original authors for their contributions to the open-source community!
-
-
-
-
+This version is maintained in the [kiwina forks](https://github.com/kiwina).

@@ -1,69 +1,58 @@
-# Use Ubuntu 20.04 as the base image
-FROM ubuntu:20.04
+# Use TensorFlow 2.19.0 as the base image (includes Python 3.11, CUDA, CuDNN)
+FROM tensorflow/tensorflow:2.19.0-gpu-jupyter
 
 # Set environment variables for non-interactive installations and Python buffering
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 
-# Install system dependencies
+# Install essential system dependencies that might not be in the base image.
+# The base TF image is Ubuntu based.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    wget curl git unzip software-properties-common build-essential \
-    libsndfile1 libffi-dev python3-dev g++ cmake gnupg && \
+    wget curl git unzip build-essential \
+    libsndfile1 libffi-dev g++ cmake && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Add deadsnakes PPA for Python 3.10
-RUN add-apt-repository ppa:deadsnakes/ppa && \
-    apt-get update && apt-get install -y python3.10 python3.10-dev python3.10-distutils && \
-    apt-get clean && rm -rf /var/lib/apt/lists/*
-
-# Install pip for Python 3.10
-RUN curl -sS https://bootstrap.pypa.io/get-pip.py | python3.10
-
-# Add NVIDIA's CUDA repository and install CUDA 12.4 Toolkit
-RUN wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2004/x86_64/cuda-ubuntu2004.pin && \
-    mv cuda-ubuntu2004.pin /etc/apt/preferences.d/cuda-repository-pin-600 && \
-    wget https://developer.download.nvidia.com/compute/cuda/12.4.0/local_installers/cuda-repo-ubuntu2004-12-4-local_12.4.0-550.54.14-1_amd64.deb && \
-    dpkg -i cuda-repo-ubuntu2004-12-4-local_12.4.0-550.54.14-1_amd64.deb && \
-    cp /var/cuda-repo-ubuntu2004-12-4-local/cuda-*-keyring.gpg /usr/share/keyrings/ && \
-    apt-get update -o Acquire::AllowInsecureRepositories=true -o Acquire::AllowDowngradeToInsecureRepositories=true && \
-    apt-get -y --allow-unauthenticated install cuda-toolkit-12-4 && \
-    apt-get -y --allow-unauthenticated install cuda-drivers && \
-    apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* /tmp/* && \
-    rm -f cuda-repo-ubuntu2004-12-4-local_12.4.0-550.54.14-1_amd64.deb
-
-# Install CuDNN 9.3
-RUN wget https://developer.download.nvidia.com/compute/cudnn/9.3.0/local_installers/cudnn-local-repo-ubuntu2004-9.3.0_1.0-1_amd64.deb && \
-    dpkg -i cudnn-local-repo-ubuntu2004-9.3.0_1.0-1_amd64.deb && \
-    cp /var/cudnn-local-repo-ubuntu2004-9.3.0/cudnn-*-keyring.gpg /usr/share/keyrings/ && \
-    apt-get update -o Acquire::AllowInsecureRepositories=true -o Acquire::AllowDowngradeToInsecureRepositories=true && \
-    apt-get -y --allow-unauthenticated install cudnn && \
-    apt-get -y --allow-unauthenticated install cudnn-cuda-12 && \
-    apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* /tmp/* && \
-    rm -f cudnn-local-repo-ubuntu2004-9.3.0_1.0-1_amd64.deb
-
-# Install Python dependencies from requirements.txt
-ADD https://raw.githubusercontent.com/MasterPhooey/MicroWakeWord-Trainer-Docker/refs/heads/main/requirements.txt /tmp/requirements.txt
+# Copy and install Python dependencies from local requirements.txt
+# These are for the trainer environment itself.
+COPY requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
-# Ensure numpy is installed for Python 3.10
-RUN python3.10 -m pip install --no-cache-dir numpy==1.26.4
+# Copy local microWakeWord project and install it
+COPY ../microWakeWord /app/microWakeWord
+RUN pip install --no-cache-dir -e /app/microWakeWord
 
-# Create a data directory for external mapping
+# Copy local piper-sample-generator project
+# It's used as scripts, but if it had its own installable package, you'd pip install -e it too.
+# For now, we ensure its scripts are accessible. The notebooks will add it to sys.path if needed,
+# or call scripts directly from /data/piper-sample-generator after prepare_local_data.py clones it there.
+# However, to ensure its direct dependencies (like piper-phonemize) are met if not covered by main reqs:
+COPY ../piper-sample-generator /app/piper-sample-generator
+# If piper-sample-generator had its own setup.py for broader use:
+# RUN pip install --no-cache-dir -e /app/piper-sample-generator
+# For now, ensure its requirements (if any beyond torch/numpy which should be handled by trainer's env) are met.
+# The piper-sample-generator/requirements.txt we edited mainly lists torch, numpy, audiomentations, etc.
+# which should be covered by the main requirements.txt or base image.
+# If it has unique small dependencies, list them in MicroWakeWord-Trainer-Docker/requirements.txt or install its reqs:
+# RUN pip install --no-cache-dir -r /app/piper-sample-generator/requirements.txt
+
+# Create a data directory for external mapping and notebook execution
 RUN mkdir -p /data
-
-# Copy the notebooks to a fallback location in the container
-ADD https://raw.githubusercontent.com/MasterPhooey/MicroWakeWord-Trainer-Docker/refs/heads/main/basic_training_notebook.ipynb /root/basic_training_notebook.ipynb
-ADD https://raw.githubusercontent.com/MasterPhooey/MicroWakeWord-Trainer-Docker/refs/heads/main/advanced_training_notebook.ipynb /root/advanced_training_notebook.ipynb
-
-# Add the startup script from GitHub
-ADD https://raw.githubusercontent.com/MasterPhooey/MicroWakeWord-Trainer-Docker/refs/heads/main/startup.sh /usr/local/bin/startup.sh
-RUN chmod +x /usr/local/bin/startup.sh
-
-# Ensure /data is the default directory for Jupyter
 WORKDIR /data
+
+# Copy the notebooks to a fallback location in the container (used by startup.sh)
+# These .ipynb files should be generated from the .py versions and placed in the
+# MicroWakeWord-Trainer-Docker directory before building the image.
+COPY basic_training_notebook.ipynb /root/basic_training_notebook.ipynb
+COPY advanced_training_notebook.ipynb /root/advanced_training_notebook.ipynb
+# COPY prepare_local_data.py /root/prepare_local_data.py # If startup.sh also copies this
+
+# Add the startup script from local file
+COPY startup.sh /usr/local/bin/startup.sh
+RUN chmod +x /usr/local/bin/startup.sh
 
 # Expose the Jupyter Notebook port
 EXPOSE 8888
 
 # Run the startup script and start Jupyter Notebook
+# Startup script will copy notebooks and prepare_local_data.py to /data if not present.
 CMD ["/bin/bash", "-c", "/usr/local/bin/startup.sh && jupyter notebook --ip=0.0.0.0 --no-browser --allow-root --NotebookApp.token='' --notebook-dir=/data"]
